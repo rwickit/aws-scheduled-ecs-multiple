@@ -10,11 +10,9 @@ The template provided here has been modified to be a more basic use case where a
 
 ## Deployment
 
-This template deploys N number of ECS Fargate task definitions and companion EventBridge Schedules using CloudFormation Loops to pair each Task with its own schedule.
+This template deploys N number of ECS Fargate task definitions, SSM Parameters, and companion EventBridge Schedules using CloudFormation Loops to pair each Task with its own schedule.
 
 Modify `Line 140` to add/remove the number of deployments desired using unique task names.
-
-You will also need to add/remove `Type: 'AWS::SSM::Parameter'` resources to support a unique config or other parameter for each Task Definition.
 
 ## Modifications
 

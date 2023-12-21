@@ -117,24 +117,6 @@ Resources:
               - << additional resources >>
               Effect: Allow
 
-  rOrg1Parameter:
-    Type: 'AWS::SSM::Parameter'
-    Properties:
-      Name: '/management/param1'
-      Type: 'String'
-      Value: 'empty'
-      Description: 'Org1 Config Pulled by ECS Task at runtime'
-      Tier: 'Standard'
-
-  rOrg2Parameter:
-    Type: 'AWS::SSM::Parameter'
-    Properties:
-      Name: '/management/param1'
-      Type: 'String'
-      Value: 'empty'
-      Description: 'Org2 Config Pulled by ECS Task at runtime'
-      Tier: 'Standard'
-
   'Fn::ForEach::Tasks':
     - TaskName
     - ["org1", "org2", "orgN"]
@@ -193,6 +175,14 @@ Resources:
                     - !Ref rEcsSecurityGroup
                   Subnets: !Ref pPrivateSubnetIds
                   AssignPublicIp: DISABLED
+      rParameter${TaskName}:
+        Type: 'AWS::SSM::Parameter'
+        Properties:
+          Name: !Sub '/scheduledTask/${TaskName}'
+          Type: 'String'
+          Value: 'empty'
+          Description: !Sub '${TaskName} Config Pulled by ECS Task at runtime'
+          Tier: 'Standard'
 
   rSchedulerRole:
     Condition: cIsPrimaryRegion
