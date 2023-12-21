@@ -1,0 +1,230 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Scheduled ECS Fargate Task Deployment
+Transform: 'AWS::LanguageExtensions'
+Metadata:
+  AWS::CloudFormation::Interface:
+
+    ParameterGroups:
+
+    - Label:
+        default: Service Definition
+      Parameters:
+      - pImageUri
+
+    - Label:
+        default: Network Configurations
+      Parameters:
+      - pVpcId
+      - pPrivateSubnetIds
+
+    ParameterLabels:
+      pImageUri:
+        default: Image URI
+      pVpcId:
+        default: VPC ID
+      pPrivateSubnetIds:
+        default: Private Subnet IDs
+
+Conditions:
+  cIsPrimaryRegion: !Equals [!Ref "AWS::Region", us-west-2] ## only launch global resources in single primary region
+
+Parameters:
+
+  pPrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >
+      The SubnetIDs to deploy the ECS cluster into
+    ConstraintDescription : must be a Subnet Id within the selected VPC Id.
+
+  pVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID of your existing Virtual Private Cloud (VPC)
+    ConstraintDescription : must be the VPC Id of an existing Virtual Private Cloud.
+
+  pImageUri:
+    Type: String
+    Description: The image uri for ECR
+
+Resources:
+
+  rEcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref pVpcId
+      GroupDescription: Access to the ECS hosts and the tasks/containers that run on them
+      SecurityGroupIngress:
+        # Modify to make more strict
+      - IpProtocol: tcp
+        FromPort: 1
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: udp
+        FromPort: 1
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: -1
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 1
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: udp
+        FromPort: 1
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: -1
+        CidrIp: 0.0.0.0/0
+
+  rCloudWatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref AWS::StackName
+      RetentionInDays: 14
+
+  rECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref AWS::StackName
+
+  rTaskDefTaskRole:
+    Condition: cIsPrimaryRegion
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-task'
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-deny'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Action:
+              - ssm:GetParameter
+              Resource:
+              - << param arn >>
+              Effect: Allow
+            - Action:
+              - << additional actions >>
+              Resource:
+              - << additional resources >>
+              Effect: Allow
+
+  rOrg1Parameter:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: '/management/param1'
+      Type: 'String'
+      Value: 'empty'
+      Description: 'Org1 Config Pulled by ECS Task at runtime'
+      Tier: 'Standard'
+
+  rOrg2Parameter:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: '/management/param1'
+      Type: 'String'
+      Value: 'empty'
+      Description: 'Org2 Config Pulled by ECS Task at runtime'
+      Tier: 'Standard'
+
+  'Fn::ForEach::Tasks':
+    - TaskName
+    - ["org1", "org2", "orgN"]
+    - rTaskDefinition${TaskName}:
+        Type: 'AWS::ECS::TaskDefinition'
+        Properties:
+          Family: !Sub ScheduledTask${TaskName}
+          Cpu: '1024'
+          Memory: '2048'
+          NetworkMode: awsvpc
+          RequiresCompatibilities:
+            - FARGATE
+          ExecutionRoleArn: !GetAtt rTaskDefTaskRole.Arn
+          TaskRoleArn: !GetAtt rTaskDefTaskRole.Arn
+          ContainerDefinitions:
+            - Name: ScheduledWorker
+              Essential: true
+              Image: !Sub '${pImageUri}'
+              EntryPoint:
+                - ""
+              Command:
+                - /bin/sh
+                - -c
+                - "echo $CONFIG | " ## use config param from secret here
+              LogConfiguration:
+                LogDriver: awslogs
+                Options:
+                  awslogs-group: !Ref AWS::StackName
+                  awslogs-region: !Ref AWS::Region
+                  awslogs-stream-prefix: scheduledWorker
+              Secrets:
+                - Name: CONFIG
+                  ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/<<PARM PATH>>/${TaskName}'
+      rTaskSchedule${TaskName}:
+        Type: 'AWS::Scheduler::Schedule'
+        Properties:
+          Name: !Sub ${AWS::StackName}-${TaskName}
+          ScheduleExpression: 'rate(24 hours)'
+          State: ENABLED
+          FlexibleTimeWindow:
+            Mode: 'OFF'
+          Target:
+            Arn: !GetAtt rECSCluster.Arn
+            RoleArn: !GetAtt rSchedulerRole.Arn
+            RetryPolicy:
+              MaximumEventAgeInSeconds: 60
+              MaximumRetryAttempts: 2
+            EcsParameters:
+              TaskCount: 1
+              TaskDefinitionArn: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/ScheduledTask${TaskName}
+              LaunchType: FARGATE
+              PlatformVersion: 1.4.0
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  SecurityGroups:
+                    - !Ref rEcsSecurityGroup
+                  Subnets: !Ref pPrivateSubnetIds
+                  AssignPublicIp: DISABLED
+
+  rSchedulerRole:
+    Condition: cIsPrimaryRegion
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-scheduler'
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: scheduler.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-trigger'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Action:
+              - ecs:RunTask
+              Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/ScheduledTask*
+              Effect: Allow
+              Condition:
+                ArnEquals:
+                  ecs:cluster: !GetAtt rECSCluster.Arn
+            - Action: iam:PassRole
+              Resource: '*'
+              Effect: Allow
+              Condition:
+                StringEquals:
+                  iam:PassedToService: ecs-tasks.amazonaws.com
+
